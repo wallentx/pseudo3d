@@ -18,6 +18,8 @@ fi
 declare -a SHADE_TABLE
 # Pre-generate lookup tables for converting xterm 256-color indices to RGB.
 declare -a XTERM_R XTERM_G XTERM_B
+# Pre-generate lookup tables for truecolor shading.
+declare -a SHADE_R SHADE_G SHADE_B
 
 # System colors (0-15) - these are often customized, so these are approximations.
 XTERM_R+=(0 0 170 85 0 170 0 170 85 85 0 255 0 255 85 255)
@@ -40,6 +42,22 @@ for i in {0..23}; do
     XTERM_R+=($gray)
     XTERM_G+=($gray)
     XTERM_B+=($gray)
+done
+
+# Pre-calculate truecolor shading tables
+for i in {0..255}; do
+    r=${XTERM_R[i]}
+    g=${XTERM_G[i]}
+    b=${XTERM_B[i]}
+    for s in {0..5}; do
+        SHADE_R[i*6+s]=$r
+        SHADE_G[i*6+s]=$g
+        SHADE_B[i*6+s]=$b
+        # Reduce brightness for the next shade level
+        r=$((r*8/10))
+        g=$((g*8/10))
+        b=$((b*8/10))
+    done
 done
 
 

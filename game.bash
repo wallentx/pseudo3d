@@ -33,6 +33,8 @@ source ./util.bash
 source ./dispatch.bash
 source ./textures.bash
 
+NTHR=${NTHR:-$(nproc)}
+
 
 LANG=C LC_ALL=C
 shopt -s extglob globasciiranges expand_aliases
@@ -108,23 +110,16 @@ gamesetup () {
     }
     trap exitfunc exit
 
-    # Create a block of '▀' characters scaled by the resolution
     declare -g hblock_fill sblock_fill
     printf -v hblock_fill '%*s' "$RESOLUTION_SCALE" ''
     hblock_fill=${hblock_fill// /▀}
-    hblock="$hblock_fill\e[${RESOLUTION_SCALE}D\e[B]" # Scaled halfblock
-
-    # Create a block of spaces for clearing columns
     printf -v sblock_fill '%*s' "$RESOLUTION_SCALE" ''
-    sblock="$sblock_fill\e[${RESOLUTION_SCALE}D\e[B]" # Scaled "space"block
-
-    hlen=${#hblock}
 
     declare -gA column
     # size-dependent vars
     update_sizes () {
         # see dumbdrawcol
-        for ((i=1;i<=rows;i++)) do column[$i]=${column[$((i-1))]}$sblock; done
+        for ((i=1;i<=rows;i++)) do column[$i]=${column[$((i-1))]}$' \e[D\e[B'; done
     }
 
     get_term_size() {
@@ -250,6 +245,7 @@ drawtexturedcol () {
     local shade_level=$((dist * 10 / far))
     ((shade_level > 5)) && shade_level=5
 
+    local -a col_array=()
     local -i y
     for ((y=0; y<rows; y++)); do
         local current_half_row_top=$((y*2))
@@ -270,10 +266,9 @@ drawtexturedcol () {
             top_color_val=${!ref}
 
             if ((truecolor)); then
-                r=${XTERM_R[top_color_val]} g=${XTERM_G[top_color_val]} b=${XTERM_B[top_color_val]}
-                ((side == 1)) && r=$((r*8/10)) && g=$((g*8/10)) && b=$((b*8/10))
-                for ((s=0; s<shade_level; s++)); do r=$((r*8/10)); g=$((g*8/10)); b=$((b*8/10)); done
-                top_color_val="$r;$g;$b"
+                local shade_idx=$((top_color_val * 6 + shade_level))
+                ((side == 1)) && shade_idx=$((top_color_val * 6 + shade_level + 1)) # A simple way to apply side shading
+                top_color_val="${SHADE_R[shade_idx]};${SHADE_G[shade_idx]};${SHADE_B[shade_idx]}"
             else
                 ((side == 1)) && top_color_val=${SHADE_TABLE[top_color_val]}
                 for ((s=0; s<shade_level; s++)); do top_color_val=${SHADE_TABLE[top_color_val]}; done
@@ -293,22 +288,26 @@ drawtexturedcol () {
             bottom_color_val=${!ref}
 
             if ((truecolor)); then
-                r=${XTERM_R[bottom_color_val]} g=${XTERM_G[bottom_color_val]} b=${XTERM_B[bottom_color_val]}
-                ((side == 1)) && r=$((r*8/10)) && g=$((g*8/10)) && b=$((b*8/10))
-                for ((s=0; s<shade_level; s++)); do r=$((r*8/10)); g=$((g*8/10)); b=$((b*8/10)); done
-                bottom_color_val="$r;$g;$b"
+                local shade_idx=$((bottom_color_val * 6 + shade_level))
+                ((side == 1)) && shade_idx=$((bottom_color_val * 6 + shade_level + 1))
+                bottom_color_val="${SHADE_R[shade_idx]};${SHADE_G[shade_idx]};${SHADE_B[shade_idx]}"
             else
                 ((side == 1)) && bottom_color_val=${SHADE_TABLE[bottom_color_val]}
                 for ((s=0; s<shade_level; s++)); do bottom_color_val=${SHADE_TABLE[bottom_color_val]}; done
             fi
         fi
 
-        # --- Assemble and print the escape codes for this row ---
+        # --- Assemble the escape codes for this row ---
         if ((top_is_wall)); then printf -v fg_str "$wall_fg_fmt" "$top_color_val"; else printf -v fg_str "$sky_grass_fg_fmt" "$top_color_val"; fi
         if ((bottom_is_wall)); then printf -v bg_str "$wall_bg_fmt" "$bottom_color_val"; else printf -v bg_str "$sky_grass_bg_fmt" "$bottom_color_val"; fi
 
-        printf "\e[%d;%dH%s%s%s" "$((y+1))" "$x" "$fg_str" "$bg_str" "$hblock_fill"
+        # Append this row's drawing command to the array
+        col_array+=("\e[$((y+1));${x}H$fg_str$bg_str$hblock_fill")
     done
+
+    # Print the entire column at once by joining the array using the most efficient method
+    local IFS=''
+    printf "%s" "${col_array[*]}"
 }
 
 
