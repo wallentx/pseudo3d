@@ -214,67 +214,97 @@ source ./colours.bash
 
 drawtexturedcol () {
     local x=$1 h=$2 side=$3 rdx=$4 rdy=$5 dist=$6
-    local wallX texX texY_top texY_bottom top_color bottom_color
+    local wallX texX texY_top texY_bottom top_color_val bottom_color_val
     local -i drawStart_half drawEnd_half
 
-    # Calculate start and end points of the wall slice in HALF-ROWS.
-    # The horizon is at `rows`. The screen is `rows*2` half-rows high.
+    # Define color formats
+    local sky_grass_fg_fmt='\e[38;5;%sm' sky_grass_bg_fmt='\e[48;5;%sm'
+    ((truecolor)) && sky_grass_fg_fmt='\e[38;2;%sm' && sky_grass_bg_fmt='\e[48;2;%sm'
+    local wall_fg_fmt='\e[38;5;%sm' wall_bg_fmt='\e[48;5;%sm'
+    ((truecolor)) && wall_fg_fmt='\e[38;2;%sm' && wall_bg_fmt='\e[48;2;%sm'
+
     ((drawStart_half = rows - h / 2))
     ((drawEnd_half = rows + h / 2))
 
-    # Calculate where the wall was hit (as a fraction of a cell).
-    if ((side == 0)); then
-        ((wallX = my + dist * rdy / fov))
-    else
-        ((wallX = mx + dist * rdx / fov))
-    fi
+    if ((side == 0)); then ((wallX = my + dist * rdy / fov)); else ((wallX = mx + dist * rdx / fov)); fi
     ((wallX %= scale))
 
-    # Calculate texture x-coordinate from wallX.
     ((texX = wallX * TEX_W / scale))
-    # Flip texture depending on camera direction.
     ((side == 0 && rdx > 0)) && ((texX = TEX_W - 1 - texX))
     ((side == 1 && rdy < 0)) && ((texX = TEX_W - 1 - texX))
 
     local -i y
     local colStr=""
 
-    # Loop for each CHARACTER row on the screen.
+    local shade_level=$((dist * 10 / far))
+    ((shade_level > 5)) && shade_level=5
+
     for ((y=0; y<rows; y++)); do
         local current_half_row_top=$((y*2))
         local current_half_row_bottom=$((y*2+1))
+        local top_is_wall=0 bottom_is_wall=0
+        local fg_str bg_str
 
-        # Determine color for the top half of the character cell.
+        # --- Top Half ---
         if ((current_half_row_top < drawStart_half)); then
-            top_color=$sky
+            top_color_val=$sky
         elif ((current_half_row_top >= drawEnd_half)); then
-            top_color=$grass
+            top_color_val=$grass
         else
-            # It's a wall part, so calculate texture y-coordinate.
+            top_is_wall=1
             ((texY_top = (current_half_row_top - (rows - h/2)) * TEX_H / h))
-            ((texY_top < 0)) && texY_top=0
-            ((texY_top >= TEX_H)) && texY_top=$((TEX_H - 1))
-            top_color=${TEX_WALL_0[texY_top*TEX_W + texX]}
+            ((texY_top < 0)) && texY_top=0; ((texY_top >= TEX_H)) && texY_top=$((TEX_H - 1))
+            top_color_val=${TEX_WALL_0[texY_top*TEX_W + texX]}
+
+            if ((truecolor)); then
+                r=${XTERM_R[top_color_val]} g=${XTERM_G[top_color_val]} b=${XTERM_B[top_color_val]}
+                ((side == 1)) && r=$((r*8/10)) && g=$((g*8/10)) && b=$((b*8/10))
+                for ((s=0; s<shade_level; s++)); do r=$((r*8/10)); g=$((g*8/10)); b=$((b*8/10)); done
+                top_color_val="$r;$g;$b"
+            else
+                ((side == 1)) && top_color_val=${SHADE_TABLE[top_color_val]}
+                for ((s=0; s<shade_level; s++)); do top_color_val=${SHADE_TABLE[top_color_val]}; done
+            fi
         fi
 
-        # Determine color for the bottom half of the character cell.
+        # --- Bottom Half ---
         if ((current_half_row_bottom < drawStart_half)); then
-            bottom_color=$sky
+            bottom_color_val=$sky
         elif ((current_half_row_bottom >= drawEnd_half)); then
-            bottom_color=$grass
+            bottom_color_val=$grass
         else
-            # It's a wall part, so calculate texture y-coordinate.
+            bottom_is_wall=1
             ((texY_bottom = (current_half_row_bottom - (rows - h/2)) * TEX_H / h))
-            ((texY_bottom < 0)) && texY_bottom=0
-            ((texY_bottom >= TEX_H)) && texY_bottom=$((TEX_H - 1))
-            bottom_color=${TEX_WALL_0[texY_bottom*TEX_W + texX]}
+            ((texY_bottom < 0)) && texY_bottom=0; ((texY_bottom >= TEX_H)) && texY_bottom=$((TEX_H - 1))
+            bottom_color_val=${TEX_WALL_0[texY_bottom*TEX_W + texX]}
+
+            if ((truecolor)); then
+                r=${XTERM_R[bottom_color_val]} g=${XTERM_G[bottom_color_val]} b=${XTERM_B[bottom_color_val]}
+                ((side == 1)) && r=$((r*8/10)) && g=$((g*8/10)) && b=$((b*8/10))
+                for ((s=0; s<shade_level; s++)); do r=$((r*8/10)); g=$((g*8/10)); b=$((b*8/10)); done
+                bottom_color_val="$r;$g;$b"
+            else
+                ((side == 1)) && bottom_color_val=${SHADE_TABLE[bottom_color_val]}
+                for ((s=0; s<shade_level; s++)); do bottom_color_val=${SHADE_TABLE[bottom_color_val]}; done
+            fi
         fi
 
-        # Append the half-block character with FG/BG colors and cursor movement.
-        colStr+=$'\e[38;5;'"$top_color"';48;5;'"$bottom_color"'m'"$hblock"
+        # --- Assemble the escape codes ---
+        if ((top_is_wall)); then
+            printf -v fg_str "$wall_fg_fmt" "$top_color_val"
+        else
+            printf -v fg_str "$sky_grass_fg_fmt" "$top_color_val"
+        fi
+
+        if ((bottom_is_wall)); then
+            printf -v bg_str "$wall_bg_fmt" "$bottom_color_val"
+        else
+            printf -v bg_str "$sky_grass_bg_fmt" "$bottom_color_val"
+        fi
+
+        colStr+="$fg_str$bg_str$hblock"
     done
 
-    # Print the whole column string at once.
     printf "\e[1;%dH%s" "$x" "$colStr"
 }
 
@@ -322,13 +352,30 @@ dist=(side?sdx-dx:sdy-dy)*fov/scale,h=dist<scale?rows*2:rows*2*scale/dist,fdist=
 # maybe this should be disabled if sync is off and we're in multithreaded mode
 [[ $MINIMAP ]]; aliasing "$?" minimap
 
-for i in "${!map[@]}"; do
-    mapc[i*3+0]=${wallsr[mapt[i]]}
-    mapc[i*3+1]=${wallsg[mapt[i]]}
-    mapc[i*3+2]=${wallsb[mapt[i]]}
-done
+declare -a mapc
+if ((truecolor)); then
+    cellfmt=$'\e[38;2;%d;%d;%d;48;2;%d;%d;%dm▀'
+    for ((i=0; i<mapw*maph; i++)); do
+        # Each map cell is one character wide. We use half-blocks, so we can show two cells vertically.
+        # FG is the current row, BG is the row below.
+        r1=${wallsr[mapt[i]]} g1=${wallsg[mapt[i]]} b1=${wallsb[mapt[i]]}
+        next_row_i=$((i+mapw))
+        ((next_row_i >= mapw*maph)) && next_row_i=$i # Use same cell if we're on the last row.
+        r2=${wallsr[mapt[next_row_i]]} g2=${wallsg[mapt[next_row_i]]} b2=${wallsb[mapt[next_row_i]]}
+        mapc+=($r1 $g1 $b1 $r2 $g2 $b2)
+    done
+else
+    cellfmt=$'\e[38;5;%dm\e[48;5;%dm▀'
+    for ((i=0; i<mapw*maph; i++)); do
+        # In 256-color mode, wallsr is the color index.
+        fg_idx=${wallsr[mapt[i]]}
+        next_row_i=$((i+mapw))
+        ((next_row_i >= mapw*maph)) && next_row_i=$i
+        bg_idx=${wallsr[mapt[next_row_i]]}
+        mapc+=($fg_idx $bg_idx)
+    done
+fi
 
-cellfmt=$'\e[38;2;%d;%d;%d;48;2;%d;%d;%dm▀'
 printf -v mapfmt '%*s' "$mapw"
 mapfmt=${mapfmt// /$cellfmt}$'\r\e[B'
 printf -v mapcache "$mapfmt" "${mapc[@]}"
