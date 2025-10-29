@@ -42,6 +42,8 @@ declare -a zBuffer
 # for the basic bash game loop: https://gist.github.com/izabera/5e0cc5fcd598f866eb7c6cc955ef3409
 
 FPS=${FPS-30}
+TEXTURE_SCALE=4
+
 
 gamesetup () {
     if [[ ! ( $TERM && -t 0 && -t 1 ) ]]; then
@@ -229,7 +231,7 @@ drawtexturedcol () {
     if ((side == 0)); then ((wallX = my + dist * rdy / fov)); else ((wallX = mx + dist * rdx / fov)); fi
     ((wallX %= scale))
 
-    ((texX = wallX * TEX_W / scale))
+    ((texX = (wallX * TEXTURE_SCALE * TEX_W / scale) & (TEX_W - 1)))
     ((side == 0 && rdx > 0)) && ((texX = TEX_W - 1 - texX))
     ((side == 1 && rdy < 0)) && ((texX = TEX_W - 1 - texX))
 
@@ -252,8 +254,7 @@ drawtexturedcol () {
             top_color_val=$grass
         else
             top_is_wall=1
-            ((texY_top = (current_half_row_top - (rows - h/2)) * TEX_H / h))
-            ((texY_top < 0)) && texY_top=0; ((texY_top >= TEX_H)) && texY_top=$((TEX_H - 1))
+            ((texY_top = ((current_half_row_top - (rows - h/2)) * TEXTURE_SCALE * TEX_H / h) & (TEX_H - 1)))
             top_color_val=${TEX_WALL_0[texY_top*TEX_W + texX]}
 
             if ((truecolor)); then
@@ -274,8 +275,7 @@ drawtexturedcol () {
             bottom_color_val=$grass
         else
             bottom_is_wall=1
-            ((texY_bottom = (current_half_row_bottom - (rows - h/2)) * TEX_H / h))
-            ((texY_bottom < 0)) && texY_bottom=0; ((texY_bottom >= TEX_H)) && texY_bottom=$((TEX_H - 1))
+            ((texY_bottom = ((current_half_row_bottom - (rows - h/2)) * TEXTURE_SCALE * TEX_H / h) & (TEX_H - 1)))
             bottom_color_val=${TEX_WALL_0[texY_bottom*TEX_W + texX]}
 
             if ((truecolor)); then
