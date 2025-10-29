@@ -214,50 +214,68 @@ source ./colours.bash
 
 drawtexturedcol () {
     local x=$1 h=$2 side=$3 rdx=$4 rdy=$5 dist=$6
-    local wallX texX texY color
-    local -i drawStart drawEnd
+    local wallX texX texY_top texY_bottom top_color bottom_color
+    local -i drawStart_half drawEnd_half
 
-    # calculate start and end points of the wall slice
-    ((drawStart = -h / 2 + rows, drawStart < 0 && (drawStart = 0)))
-    ((drawEnd = h / 2 + rows, drawEnd >= rows*2 && (drawEnd = rows*2 - 1)))
+    # Calculate start and end points of the wall slice in HALF-ROWS.
+    # The horizon is at `rows`. The screen is `rows*2` half-rows high.
+    ((drawStart_half = rows - h / 2))
+    ((drawEnd_half = rows + h / 2))
 
-    # calculate where the wall was hit
+    # Calculate where the wall was hit (as a fraction of a cell).
     if ((side == 0)); then
         ((wallX = my + dist * rdy / fov))
     else
         ((wallX = mx + dist * rdx / fov))
     fi
-    ((wallX = wallX % scale))
+    ((wallX %= scale))
 
-    # calculate texture x-coordinate
+    # Calculate texture x-coordinate from wallX.
     ((texX = wallX * TEX_W / scale))
-    ((side == 0 && rdx > 0)) && ((texX = TEX_W - texX - 1))
-    ((side == 1 && rdy < 0)) && ((texX = TEX_W - texX - 1))
+    # Flip texture depending on camera direction.
+    ((side == 0 && rdx > 0)) && ((texX = TEX_W - 1 - texX))
+    ((side == 1 && rdy < 0)) && ((texX = TEX_W - 1 - texX))
 
     local -i y
     local colStr=""
 
-    # prepare the ceiling part
-    for ((y=0; y < drawStart/2; y++)); do
-        colStr+=$'\e[48;5;'"$sky"'m \e[B\e[D'
+    # Loop for each CHARACTER row on the screen.
+    for ((y=0; y<rows; y++)); do
+        local current_half_row_top=$((y*2))
+        local current_half_row_bottom=$((y*2+1))
+
+        # Determine color for the top half of the character cell.
+        if ((current_half_row_top < drawStart_half)); then
+            top_color=$sky
+        elif ((current_half_row_top >= drawEnd_half)); then
+            top_color=$grass
+        else
+            # It's a wall part, so calculate texture y-coordinate.
+            ((texY_top = (current_half_row_top - (rows - h/2)) * TEX_H / h))
+            ((texY_top < 0)) && texY_top=0
+            ((texY_top >= TEX_H)) && texY_top=$((TEX_H - 1))
+            top_color=${TEX_WALL_0[texY_top*TEX_W + texX]}
+        fi
+
+        # Determine color for the bottom half of the character cell.
+        if ((current_half_row_bottom < drawStart_half)); then
+            bottom_color=$sky
+        elif ((current_half_row_bottom >= drawEnd_half)); then
+            bottom_color=$grass
+        else
+            # It's a wall part, so calculate texture y-coordinate.
+            ((texY_bottom = (current_half_row_bottom - (rows - h/2)) * TEX_H / h))
+            ((texY_bottom < 0)) && texY_bottom=0
+            ((texY_bottom >= TEX_H)) && texY_bottom=$((TEX_H - 1))
+            bottom_color=${TEX_WALL_0[texY_bottom*TEX_W + texX]}
+        fi
+
+        # Append the half-block character with FG/BG colors and cursor movement.
+        colStr+=$'\e[38;5;'"$top_color"';48;5;'"$bottom_color"'m'"$hblock"
     done
 
-    # prepare the textured wall part
-    for ((y=drawStart; y<=drawEnd; y++)); do
-        # calculate texture y-coordinate
-        ((texY = (y * 2 - rows * 2 + h) * TEX_H / (h * 2)))
-        ((texY < 0)) && texY=0
-        ((texY >= TEX_H)) && texY=$((TEX_H-1))
-
-        color=${TEX_WALL_0[texY*TEX_W + texX]}
-        colStr+=$'\e[48;5;'"$color"'m \e[B\e[D'
-    done
-
-    # prepare the floor part
-    for ((y=(drawEnd/2)+1; y<=rows; y++)); do
-        colStr+=$'\e[48;5;'"$grass"'m \e[B\e[D'
-    done
-    printf "\e[%d;%dH%s" 1 "$x" "$colStr"
+    # Print the whole column string at once.
+    printf "\e[1;%dH%s" "$x" "$colStr"
 }
 
 
