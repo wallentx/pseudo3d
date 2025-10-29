@@ -44,8 +44,20 @@ declare -a zBuffer
 # for the basic bash game loop: https://gist.github.com/izabera/5e0cc5fcd598f866eb7c6cc955ef3409
 
 FPS=${FPS-30}
-TEXTURE_SCALE=4
-RESOLUTION_SCALE=2
+TEXTURE_SCALE=${TEXTURE_SCALE:-4}
+RESOLUTION_SCALE=${RESOLUTION_SCALE:-2}
+AUTOSCALE=${AUTOSCALE:-1}
+TARGET_FPS=${TARGET_FPS:-30}
+RES_MIN=${RES_MIN:-1}
+RES_MAX=${RES_MAX:-4}
+
+# Recompute variables derived from RESOLUTION_SCALE
+recompute_resolution_vars () {
+    printf -v hblock_fill '%*s' "$RESOLUTION_SCALE" ''
+    hblock_fill=${hblock_fill// /▀}
+    printf -v sblock_fill '%*s' "$RESOLUTION_SCALE" ''
+    reposition_row=$'\e['"$RESOLUTION_SCALE"$'D\e[B'
+}
 
 
 gamesetup () {
@@ -113,10 +125,7 @@ gamesetup () {
     trap exitfunc exit
 
     declare -g hblock_fill sblock_fill reposition_row
-    printf -v hblock_fill '%*s' "$RESOLUTION_SCALE" ''
-    hblock_fill=${hblock_fill// /▀}
-    printf -v sblock_fill '%*s' "$RESOLUTION_SCALE" ''
-    reposition_row=$'\e['"$RESOLUTION_SCALE"$'D\e[B'
+    recompute_resolution_vars
 
     declare -gA column
     # size-dependent vars
@@ -287,14 +296,9 @@ drawtexturedcol () {
     floor_rows=$((rows - ceil_rows - wall_full_rows - top_boundary - bottom_boundary))
     ((floor_rows<0)) && floor_rows=0
 
-    # Emit ceiling full rows using relative reposition with autowrap disabled
-    colbuf+="${SKY_FG}${SKY_BG}"
+    # Emit ceiling full rows with absolute addressing (avoids wrap issues)
     for ((y=0; y<ceil_rows && rows_out<rows; y++)); do
-        if ((rows_out+1<rows)); then
-            colbuf+="${hblock_fill}${reposition_row}"
-        else
-            colbuf+="${hblock_fill}"
-        fi
+        colbuf+="${ESC}[$((rows_out+1));${x}H${SKY_FG}${SKY_BG}${hblock_fill}"
         rows_out+=1
         acc_top=$((acc_top + (step_fp<<1)))
     done
@@ -314,31 +318,31 @@ drawtexturedcol () {
             local shaded=${SHADE_N[shade_side*256 + color]}
             bottom_seq=${BG256[shaded]}
         fi
-        colbuf+="${top_seq}${bottom_seq}"
-        if ((rows_out+1<rows)); then
-            colbuf+="${hblock_fill}${reposition_row}"
-        else
-            colbuf+="${hblock_fill}"
-        fi
+        colbuf+="${ESC}[$((rows_out+1));${x}H${top_seq}${bottom_seq}${hblock_fill}"
         rows_out+=1
         acc_top=$((acc_top + (step_fp<<1)))
     fi
 
-    # Full wall rows (both halves wall)
-    for ((y=0; y<wall_full_rows && rows_out<rows; y++)); do
+    # Full wall rows (both halves wall) with decimation for far walls
+    local -i row_stride=1
+    if (( h < rows/6 )); then
+        row_stride=3
+    elif (( h < rows/3 )); then
+        row_stride=2
+    fi
+    for ((y=0; y<wall_full_rows && rows_out<rows; y+=row_stride)); do
         ((texY_top = ((acc_top >> FP_SHIFT) & (TEX_H - 1))))
         ((texY_bottom = (((acc_top + step_fp) >> FP_SHIFT) & (TEX_H - 1))))
         top_seq=${FG_WALL_SEQ[texY_top]}
         bottom_seq=${BG_WALL_SEQ[texY_bottom]}
 
-        colbuf+="${top_seq}${bottom_seq}"
-        if ((rows_out+1<rows)); then
-            colbuf+="${hblock_fill}${reposition_row}"
-        else
-            colbuf+="${hblock_fill}"
-        fi
-        rows_out+=1
-        acc_top=$((acc_top + (step_fp<<1)))
+        # Emit up to row_stride rows with same shading for performance
+        local -i r
+        for ((r=0; r<row_stride && (y+r)<wall_full_rows && rows_out<rows; r++)); do
+            colbuf+="${ESC}[$((rows_out+1));${x}H${top_seq}${bottom_seq}${hblock_fill}"
+            rows_out+=1
+            acc_top=$((acc_top + (step_fp<<1)))
+        done
     done
 
     # Bottom boundary mixed row (top wall, bottom grass)
@@ -347,24 +351,14 @@ drawtexturedcol () {
         ((texY_top = ((acc_top >> FP_SHIFT) & (TEX_H - 1))))
         top_seq=${FG_WALL_SEQ[texY_top]}
         bottom_seq=$GRASS_BG
-        colbuf+="${top_seq}${bottom_seq}"
-        if ((rows_out+1<rows)); then
-            colbuf+="${hblock_fill}${reposition_row}"
-        else
-            colbuf+="${hblock_fill}"
-        fi
+        colbuf+="${ESC}[$((rows_out+1));${x}H${top_seq}${bottom_seq}${hblock_fill}"
         rows_out+=1
         acc_top=$((acc_top + (step_fp<<1)))
     fi
 
     # Emit floor full rows
-    colbuf+="${GRASS_FG}${GRASS_BG}"
     for ((y=0; y<floor_rows && rows_out<rows; y++)); do
-        if ((rows_out+1<rows)); then
-            colbuf+="${hblock_fill}${reposition_row}"
-        else
-            colbuf+="${hblock_fill}"
-        fi
+        colbuf+="${ESC}[$((rows_out+1));${x}H${GRASS_FG}${GRASS_BG}${hblock_fill}"
         rows_out+=1
         acc_top=$((acc_top + (step_fp<<1)))
     done
@@ -453,6 +447,7 @@ minimapfmt="%s\e[%dA\e[%dC$cellfmt\e[m"
 
 exec {outfile}>"${OUTFILE-/dev/tty}"
 declare -A frametimes
+declare -g auto_frames=0 auto_total_us=0
 drawframe () {
     frame_start=${EPOCHREALTIME/.}
     sync printf '\e[?2026h'
@@ -473,7 +468,27 @@ drawframe () {
     minimap printf "\e[1;1H$minimapfmt" "$mapcache" "$(((maph-row)/2))" "$col" "$fgr" "$fgg" "$fgb" "$bgr" "$bgg" "$bgb"
 
     sync printf '\e[?2026l'
-    ((frametimes[$((${EPOCHREALTIME/.}-frame_start))]++))
+    local frame_end=${EPOCHREALTIME/.}
+    ((frametimes[$((frame_end-frame_start))]++))
+
+    if ((AUTOSCALE)); then
+        auto_total_us=$((auto_total_us + (frame_end - frame_start)))
+        ((auto_frames++))
+        if ((auto_frames>=60)); then
+            avg_us=$((auto_total_us/auto_frames))
+            ((avg_us==0)) && avg_us=1
+            fps_est=$((1000000/avg_us))
+            if ((fps_est < TARGET_FPS-2 && RESOLUTION_SCALE < RES_MAX)); then
+                ((RESOLUTION_SCALE++))
+                recompute_resolution_vars
+            elif ((fps_est > TARGET_FPS+3 && RESOLUTION_SCALE > RES_MIN)); then
+                ((RESOLUTION_SCALE--))
+                recompute_resolution_vars
+            fi
+            auto_frames=0
+            auto_total_us=0
+        fi
+    fi
 }
 
 run_listeners
@@ -493,13 +508,17 @@ bomb=4
 addstate walls{r,g,b}\[{"$bomb","$((wallcount+bomb))"}]{,}
 addstate fov
 
-collision='(map[mx/scale*mapw+my/scale]|1)==1'
+# Keep a small clearance from walls (player radius ~ scale/6)
+pad=$((scale/6))
+# Axis-separated collision against the tile in the direction of motion only
+collisionx='(map[(mx+(cos<0?-pad:pad))/scale*mapw+my/scale]==0)'
+collisiony='(map[mx/scale*mapw+(my+(sin<0?-pad:pad))/scale]==0)'
 move='t=pos*speed*deltat/scale**2'
 smoothing='speed=speed*3**(deltat/15000)/4**(deltat/15000)'
 
 printf -v movement %s, \
-    "${move//pos/mx+cos}" "${collision/mx/t}&&(mx=t)" \
-    "${move//pos/my+sin}" "${collision/my/t}&&(my=t)" \
+    "${move//pos/mx+cos}" "${collisionx/mx/t}&&(mx=t)" \
+    "${move//pos/my+sin}" "${collisiony/my/t}&&(my=t)" \
     "$smoothing" "${smoothing//speed/rspeed}"
 movement=${movement%,}
 
