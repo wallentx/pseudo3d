@@ -31,10 +31,13 @@ source ./maths.bash
 source ./maps.bash
 source ./util.bash
 source ./dispatch.bash
+source ./textures.bash
 
 
 LANG=C LC_ALL=C
 shopt -s extglob globasciiranges expand_aliases
+
+declare -a zBuffer
 
 # for the basic bash game loop: https://gist.github.com/izabera/5e0cc5fcd598f866eb7c6cc955ef3409
 
@@ -209,27 +212,52 @@ source ./colours.bash
 # so this could use a long string of $'▀\e[D\e[B' as tall as the screen, but that'd be slower
 # instead we use a specialised version that's shorter
 
-#                      <cursor><--ceiling--><--------wall-------><-------floor------->
-alias drawcol='printf "\e[1;%sH\e[48;5;%sm%s\e[38;5;%s;48;5;%sm%s\e[38;5;%s;48;5;%sm%s"'
-((truecolor)) && alias drawcol=${BASH_ALIASES[drawcol]//5/2}
+drawtexturedcol () {
+    local x=$1 h=$2 side=$3 rdx=$4 rdy=$5 dist=$6
+    local wallX texX texY color
+    local -i drawStart drawEnd
 
-# dumb function that doesn't know where the horizon is
-# two versions because one case is painful
-# $1 column
-# $2 colour
-# $3 starting (half)row
-# $4 length
-dumbdrawcol () {
-    # this does not deal correctly with height == 0, so make sure all walls are close by
-((hihalf=$3%2,lohalf=($3+$4)%2,
-ceiling=$3/2,
-wall=($4-hihalf-lohalf)/2,
-floor=rows-($3/2+wall+hihalf+lohalf)))
-    drawcol \
-        "$1" \
-        "$sky"          "${column[$ceiling]}" \
-        "$sky" "$2"     "${hblock[!hihalf]}${column[$wall]}" \
-        "$2"   "$grass" "${hblock[!lohalf]}${column[$floor]}"
+    # calculate start and end points of the wall slice
+    ((drawStart = -h / 2 + rows, drawStart < 0 && (drawStart = 0)))
+    ((drawEnd = h / 2 + rows, drawEnd >= rows*2 && (drawEnd = rows*2 - 1)))
+
+    # calculate where the wall was hit
+    if ((side == 0)); then
+        ((wallX = my + dist * rdy / fov))
+    else
+        ((wallX = mx + dist * rdx / fov))
+    fi
+    ((wallX = wallX % scale))
+
+    # calculate texture x-coordinate
+    ((texX = wallX * TEX_W / scale))
+    ((side == 0 && rdx > 0)) && ((texX = TEX_W - texX - 1))
+    ((side == 1 && rdy < 0)) && ((texX = TEX_W - texX - 1))
+
+    local -i y
+    local colStr=""
+
+    # prepare the ceiling part
+    for ((y=0; y < drawStart/2; y++)); do
+        colStr+=$'\e[48;5;'"$sky"'m \e[B\e[D'
+    done
+
+    # prepare the textured wall part
+    for ((y=drawStart; y<=drawEnd; y++)); do
+        # calculate texture y-coordinate
+        ((texY = (y * 2 - rows * 2 + h) * TEX_H / (h * 2)))
+        ((texY < 0)) && texY=0
+        ((texY >= TEX_H)) && texY=$((TEX_H-1))
+
+        color=${TEX_WALL_0[texY*TEX_W + texX]}
+        colStr+=$'\e[48;5;'"$color"'m \e[B\e[D'
+    done
+
+    # prepare the floor part
+    for ((y=(drawEnd/2)+1; y<=rows; y++)); do
+        colStr+=$'\e[48;5;'"$grass"'m \e[B\e[D'
+    done
+    printf "\e[%d;%dH%s" 1 "$x" "$colStr"
 }
 
 
@@ -264,17 +292,8 @@ rdy<0?(sy=-scale,sdy=(my-mapY)*dy/scale):(sy=scale,sdy=(mapY+scale-my)*dy/scale)
 hit,w=(w+side*wallcount)&mask0f,
 dist=(side?sdx-dx:sdy-dy)*fov/scale,h=dist<scale?rows*2:rows*2*scale/dist,fdist=far-(dist>far?far:dist)))
 
-        # this is not at all how light works but it looks ok
-        # dist 0 -> colour 100%
-        # dist 11.5 -> colour 0%
-
-        # depth map
-        depthmap 256col dumbdrawcol "$((x+1))" "$((255-2*dist/scale))"          "$(((rows*2-h)/2))" "$h"
-        depthmap 24bit  dumbdrawcol "$((x+1))" "$((z=255-22*dist/scale));$z;$z" "$(((rows*2-h)/2))" "$h"
-
-        # wall colours
-        nodepthmap 256col dumbdrawcol "$((x+1))" "$((16+wallsr[w]*fdist/far*6/256*36+wallsg[w]*fdist/far*6/256*6+wallsb[w]*fdist/far*6/256))" "$(((rows*2-h)/2))" "$h"
-        nodepthmap 24bit  dumbdrawcol "$((x+1))" "$((wallsr[w]*fdist/far));$((wallsg[w]*fdist/far));$((wallsb[w]*fdist/far))" "$(((rows*2-h)/2))" "$h"
+        zBuffer[x]=$dist
+        drawtexturedcol "$((x+1))" "$h" "$side" "$rdx" "$rdy" "$dist"
     done
 }
 
@@ -317,7 +336,7 @@ drawframe () {
     multithread     read -rn1 -u"${notify[t]}"
     multithread     buffered read -rd '' 'buffered[t]' < buffered."$t"
     multithread done
-    multithread buffered printf %s "${buffered[@]}"
+    multithread buffered printf %b "${buffered[@]}"
 
     singlethread drawrays
 
