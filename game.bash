@@ -42,7 +42,8 @@ declare -a zBuffer
 # for the basic bash game loop: https://gist.github.com/izabera/5e0cc5fcd598f866eb7c6cc955ef3409
 
 FPS=${FPS-30}
-TEXTURE_SCALE=4
+TEXTURE_SCALE=2
+RESOLUTION_SCALE=2
 
 
 gamesetup () {
@@ -107,8 +108,16 @@ gamesetup () {
     }
     trap exitfunc exit
 
-    hblock=$'▀\e[D\e[B' # halfblock
-    sblock=$' \e[D\e[B' # "space"block (yes i'm very good at naming things)
+    # Create a block of '▀' characters scaled by the resolution
+    declare -g hblock_fill sblock_fill
+    printf -v hblock_fill '%*s' "$RESOLUTION_SCALE" ''
+    hblock_fill=${hblock_fill// /▀}
+    hblock="$hblock_fill\e[${RESOLUTION_SCALE}D\e[B]" # Scaled halfblock
+
+    # Create a block of spaces for clearing columns
+    printf -v sblock_fill '%*s' "$RESOLUTION_SCALE" ''
+    sblock="$sblock_fill\e[${RESOLUTION_SCALE}D\e[B]" # Scaled "space"block
+
     hlen=${#hblock}
 
     declare -gA column
@@ -215,7 +224,7 @@ source ./colours.bash
 # instead we use a specialised version that's shorter
 
 drawtexturedcol () {
-    local x=$1 h=$2 side=$3 rdx=$4 rdy=$5 dist=$6
+    local x=$1 h=$2 side=$3 rdx=$4 rdy=$5 dist=$6 w=$7
     local wallX texX texY_top texY_bottom top_color_val bottom_color_val
     local -i drawStart_half drawEnd_half
 
@@ -235,12 +244,13 @@ drawtexturedcol () {
     ((side == 0 && rdx > 0)) && ((texX = TEX_W - 1 - texX))
     ((side == 1 && rdy < 0)) && ((texX = TEX_W - 1 - texX))
 
-    local -i y
-    local colStr=""
+    local tex_id=$(((w-1) % 4))
+    local tex_name="TEX_WALL_$tex_id"
 
     local shade_level=$((dist * 10 / far))
     ((shade_level > 5)) && shade_level=5
 
+    local -i y
     for ((y=0; y<rows; y++)); do
         local current_half_row_top=$((y*2))
         local current_half_row_bottom=$((y*2+1))
@@ -255,7 +265,9 @@ drawtexturedcol () {
         else
             top_is_wall=1
             ((texY_top = ((current_half_row_top - (rows - h/2)) * TEXTURE_SCALE * TEX_H / h) & (TEX_H - 1)))
-            top_color_val=${TEX_WALL_0[texY_top*TEX_W + texX]}
+            local index=$((texY_top*TEX_W + texX))
+            local ref="${tex_name}[$index]"
+            top_color_val=${!ref}
 
             if ((truecolor)); then
                 r=${XTERM_R[top_color_val]} g=${XTERM_G[top_color_val]} b=${XTERM_B[top_color_val]}
@@ -276,7 +288,9 @@ drawtexturedcol () {
         else
             bottom_is_wall=1
             ((texY_bottom = ((current_half_row_bottom - (rows - h/2)) * TEXTURE_SCALE * TEX_H / h) & (TEX_H - 1)))
-            bottom_color_val=${TEX_WALL_0[texY_bottom*TEX_W + texX]}
+            local index=$((texY_bottom*TEX_W + texX))
+            local ref="${tex_name}[$index]"
+            bottom_color_val=${!ref}
 
             if ((truecolor)); then
                 r=${XTERM_R[bottom_color_val]} g=${XTERM_G[bottom_color_val]} b=${XTERM_B[bottom_color_val]}
@@ -289,23 +303,12 @@ drawtexturedcol () {
             fi
         fi
 
-        # --- Assemble the escape codes ---
-        if ((top_is_wall)); then
-            printf -v fg_str "$wall_fg_fmt" "$top_color_val"
-        else
-            printf -v fg_str "$sky_grass_fg_fmt" "$top_color_val"
-        fi
+        # --- Assemble and print the escape codes for this row ---
+        if ((top_is_wall)); then printf -v fg_str "$wall_fg_fmt" "$top_color_val"; else printf -v fg_str "$sky_grass_fg_fmt" "$top_color_val"; fi
+        if ((bottom_is_wall)); then printf -v bg_str "$wall_bg_fmt" "$bottom_color_val"; else printf -v bg_str "$sky_grass_bg_fmt" "$bottom_color_val"; fi
 
-        if ((bottom_is_wall)); then
-            printf -v bg_str "$wall_bg_fmt" "$bottom_color_val"
-        else
-            printf -v bg_str "$sky_grass_bg_fmt" "$bottom_color_val"
-        fi
-
-        colStr+="$fg_str$bg_str$hblock"
+        printf "\e[%d;%dH%s%s%s" "$((y+1))" "$x" "$fg_str" "$bg_str" "$hblock_fill"
     done
-
-    printf "\e[1;%dH%s" "$x" "$colStr"
 }
 
 
@@ -315,7 +318,7 @@ drawtexturedcol () {
 hit='(side=sdx<sdy)?(sdx+=dx,mapX+=sx):(sdy+=dy,mapY+=sy),'
 
 if [[ $DEPTH ]]; aliasing "$?" depthmap; then
-    hit+='map[mapX/scale*mapw+mapY/scale]||hit'
+    hit+='(w=map[mapX/scale*mapw+mapY/scale])||hit'
 else
     hit+='(w=map[mapX/scale*mapw+mapY/scale])||hit'
 fi
@@ -326,7 +329,7 @@ drawrays () {
     # fov depends on aspect ratio
     ((planeX=sin*fov*cols/(rows*4*scale),planeY=-cos*fov*cols/(rows*4*scale),begin=cols*tid/NTHR,end=cols*(tid+1)/NTHR))
 
-    for ((x=begin;x<end;x++)) do
+    for ((x=begin;x<end;x+=RESOLUTION_SCALE)) do
 ((cameraX=2*x*scale/cols-scale,
 mapX=mx&maskf0,mapY=my&maskf0,
 rdx=cos+planeX*cameraX/scale,
@@ -337,11 +340,11 @@ dx=rdx?scale*scale/adX:inf,
 dy=rdy?scale*scale/adY:inf,
 rdx<0?(sx=-scale,sdx=(mx-mapX)*dx/scale):(sx=scale,sdx=(mapX+scale-mx)*dx/scale),
 rdy<0?(sy=-scale,sdy=(my-mapY)*dy/scale):(sy=scale,sdy=(mapY+scale-my)*dy/scale),
-hit,w=(w+side*wallcount)&mask0f,
+hit,
 dist=(side?sdx-dx:sdy-dy)*fov/scale,h=dist<scale?rows*2:rows*2*scale/dist,fdist=far-(dist>far?far:dist)))
 
         zBuffer[x]=$dist
-        drawtexturedcol "$((x+1))" "$h" "$side" "$rdx" "$rdy" "$dist"
+        drawtexturedcol "$((x+1))" "$h" "$side" "$rdx" "$rdy" "$dist" "$w"
     done
 }
 
