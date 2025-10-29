@@ -44,7 +44,7 @@ declare -a zBuffer
 # for the basic bash game loop: https://gist.github.com/izabera/5e0cc5fcd598f866eb7c6cc955ef3409
 
 FPS=${FPS-30}
-TEXTURE_SCALE=2
+TEXTURE_SCALE=4
 RESOLUTION_SCALE=2
 
 
@@ -61,6 +61,7 @@ gamesetup () {
         '\e[?1049h'         'alt screen on'        \
         '\e[?25l'           'cursor off'           \
         '\e[?1004h'         'report focus'         \
+        '\e[?7l'            'autowrap off'         \
         '\e[m'              'reset colours'        \
         '\e[2J'             'erase screen'         \
         '\e[?u'             'kitty kbd proto'      \
@@ -103,6 +104,7 @@ gamesetup () {
         printf %b%.b >/dev/tty \
             '\e[?1004l' 'focus off' \
             '\e[?25h'   'cursor on' \
+            '\e[?7h'    'autowrap on' \
             '\e[?1049l' 'alt screen off'
 
         stty echo sane
@@ -110,10 +112,11 @@ gamesetup () {
     }
     trap exitfunc exit
 
-    declare -g hblock_fill sblock_fill
+    declare -g hblock_fill sblock_fill reposition_row
     printf -v hblock_fill '%*s' "$RESOLUTION_SCALE" ''
     hblock_fill=${hblock_fill// /▀}
     printf -v sblock_fill '%*s' "$RESOLUTION_SCALE" ''
+    reposition_row=$'\e['"$RESOLUTION_SCALE"$'D\e[B'
 
     declare -gA column
     # size-dependent vars
@@ -220,14 +223,9 @@ source ./colours.bash
 
 drawtexturedcol () {
     local x=$1 h=$2 side=$3 rdx=$4 rdy=$5 dist=$6 w=$7
-    local wallX texX texY_top texY_bottom top_color_val bottom_color_val
+    local wallX texX texY_top texY_bottom
     local -i drawStart_half drawEnd_half
-
-    # Define color formats
-    local sky_grass_fg_fmt='\e[38;5;%sm' sky_grass_bg_fmt='\e[48;5;%sm'
-    ((truecolor)) && sky_grass_fg_fmt='\e[38;2;%sm' && sky_grass_bg_fmt='\e[48;2;%sm'
-    local wall_fg_fmt='\e[38;5;%sm' wall_bg_fmt='\e[48;5;%sm'
-    ((truecolor)) && wall_fg_fmt='\e[38;2;%sm' && wall_bg_fmt='\e[48;2;%sm'
+    local ESC=$'\e'
 
     ((drawStart_half = rows - h / 2))
     ((drawEnd_half = rows + h / 2))
@@ -241,73 +239,138 @@ drawtexturedcol () {
 
     local tex_id=$(((w-1) % 4))
     local tex_name="TEX_WALL_$tex_id"
+    declare -n tex="$tex_name"
 
     local shade_level=$((dist * 10 / far))
     ((shade_level > 5)) && shade_level=5
+    local shade_side=$((shade_level + (side==1)))
+    ((shade_side > 6)) && shade_side=6
 
-    local -a col_array=()
-    local -i y
-    for ((y=0; y<rows; y++)); do
-        local current_half_row_top=$((y*2))
-        local current_half_row_bottom=$((y*2+1))
-        local top_is_wall=0 bottom_is_wall=0
-        local fg_str bg_str
+    local -i y rows_out=0
+    local top_seq bottom_seq
+    local colbuf="${ESC}[1;${x}H"
 
-        # --- Top Half ---
-        if ((current_half_row_top < drawStart_half)); then
-            top_color_val=$sky
-        elif ((current_half_row_top >= drawEnd_half)); then
-            top_color_val=$grass
+    # Fixed-point accumulator for texture Y (avoid per-row division)
+    local -i FP_SHIFT=16
+    local -i step_fp acc_top
+    if ((h>0)); then
+        step_fp=$(( (TEXTURE_SCALE * TEX_H << FP_SHIFT) / h ))
+    else
+        step_fp=0
+    fi
+    acc_top=$(( -drawStart_half * step_fp ))
+
+    # Precompute shaded wall sequences for this column (all texY for this texX)
+    local -a FG_WALL_SEQ BG_WALL_SEQ
+    for ((y=0; y<TEX_H; y++)); do
+        local color=${tex[y*TEX_W + texX]}
+        if ((truecolor)); then
+            local idx=$((color*7 + shade_side))
+            FG_WALL_SEQ[y]=${FG_TRUE_SHADES[idx]}
+            BG_WALL_SEQ[y]=${BG_TRUE_SHADES[idx]}
         else
-            top_is_wall=1
-            ((texY_top = ((current_half_row_top - (rows - h/2)) * TEXTURE_SCALE * TEX_H / h) & (TEX_H - 1)))
-            local index=$((texY_top*TEX_W + texX))
-            local ref="${tex_name}[$index]"
-            top_color_val=${!ref}
-
-            if ((truecolor)); then
-                local shade_idx=$((top_color_val * 6 + shade_level))
-                ((side == 1)) && shade_idx=$((top_color_val * 6 + shade_level + 1)) # A simple way to apply side shading
-                top_color_val="${SHADE_R[shade_idx]};${SHADE_G[shade_idx]};${SHADE_B[shade_idx]}"
-            else
-                ((side == 1)) && top_color_val=${SHADE_TABLE[top_color_val]}
-                for ((s=0; s<shade_level; s++)); do top_color_val=${SHADE_TABLE[top_color_val]}; done
-            fi
+            local shaded=${SHADE_N[shade_side*256 + color]}
+            FG_WALL_SEQ[y]=${FG256[shaded]}
+            BG_WALL_SEQ[y]=${BG256[shaded]}
         fi
-
-        # --- Bottom Half ---
-        if ((current_half_row_bottom < drawStart_half)); then
-            bottom_color_val=$sky
-        elif ((current_half_row_bottom >= drawEnd_half)); then
-            bottom_color_val=$grass
-        else
-            bottom_is_wall=1
-            ((texY_bottom = ((current_half_row_bottom - (rows - h/2)) * TEXTURE_SCALE * TEX_H / h) & (TEX_H - 1)))
-            local index=$((texY_bottom*TEX_W + texX))
-            local ref="${tex_name}[$index]"
-            bottom_color_val=${!ref}
-
-            if ((truecolor)); then
-                local shade_idx=$((bottom_color_val * 6 + shade_level))
-                ((side == 1)) && shade_idx=$((bottom_color_val * 6 + shade_level + 1))
-                bottom_color_val="${SHADE_R[shade_idx]};${SHADE_G[shade_idx]};${SHADE_B[shade_idx]}"
-            else
-                ((side == 1)) && bottom_color_val=${SHADE_TABLE[bottom_color_val]}
-                for ((s=0; s<shade_level; s++)); do bottom_color_val=${SHADE_TABLE[bottom_color_val]}; done
-            fi
-        fi
-
-        # --- Assemble the escape codes for this row ---
-        if ((top_is_wall)); then printf -v fg_str "$wall_fg_fmt" "$top_color_val"; else printf -v fg_str "$sky_grass_fg_fmt" "$top_color_val"; fi
-        if ((bottom_is_wall)); then printf -v bg_str "$wall_bg_fmt" "$bottom_color_val"; else printf -v bg_str "$sky_grass_bg_fmt" "$bottom_color_val"; fi
-
-        # Append this row's drawing command to the array
-        col_array+=("\e[$((y+1));${x}H$fg_str$bg_str$hblock_fill")
     done
 
-    # Print the entire column at once by joining the array using the most efficient method
-    local IFS=''
-    printf "%s" "${col_array[*]}"
+    # Calculate spans
+    local -i ceil_rows wall_half_count wall_full_rows floor_rows
+    local -i top_boundary bottom_boundary
+    ceil_rows=$((drawStart_half/2))
+    top_boundary=$((drawStart_half & 1))
+    bottom_boundary=$((drawEnd_half & 1))
+    wall_half_count=$((drawEnd_half - drawStart_half))
+    ((wall_half_count<0)) && wall_half_count=0
+    wall_full_rows=$((wall_half_count/2))
+    floor_rows=$((rows - ceil_rows - wall_full_rows - top_boundary - bottom_boundary))
+    ((floor_rows<0)) && floor_rows=0
+
+    # Emit ceiling full rows using relative reposition with autowrap disabled
+    colbuf+="${SKY_FG}${SKY_BG}"
+    for ((y=0; y<ceil_rows && rows_out<rows; y++)); do
+        if ((rows_out+1<rows)); then
+            colbuf+="${hblock_fill}${reposition_row}"
+        else
+            colbuf+="${hblock_fill}"
+        fi
+        rows_out+=1
+        acc_top=$((acc_top + (step_fp<<1)))
+    done
+
+    # Top boundary mixed row (top sky, bottom wall)
+    if ((top_boundary && rows_out<rows)); then
+        # top is sky
+        top_seq=$SKY_FG
+        # bottom is first wall half
+        ((texY_bottom = (((acc_top + step_fp) >> FP_SHIFT) & (TEX_H - 1))))
+        local index=$((texY_bottom*TEX_W + texX))
+        local color=${tex[index]}
+        if ((truecolor)); then
+            local idx=$((color*7 + shade_side))
+            bottom_seq=${BG_TRUE_SHADES[idx]}
+        else
+            local shaded=${SHADE_N[shade_side*256 + color]}
+            bottom_seq=${BG256[shaded]}
+        fi
+        colbuf+="${top_seq}${bottom_seq}"
+        if ((rows_out+1<rows)); then
+            colbuf+="${hblock_fill}${reposition_row}"
+        else
+            colbuf+="${hblock_fill}"
+        fi
+        rows_out+=1
+        acc_top=$((acc_top + (step_fp<<1)))
+    fi
+
+    # Full wall rows (both halves wall)
+    for ((y=0; y<wall_full_rows && rows_out<rows; y++)); do
+        ((texY_top = ((acc_top >> FP_SHIFT) & (TEX_H - 1))))
+        ((texY_bottom = (((acc_top + step_fp) >> FP_SHIFT) & (TEX_H - 1))))
+        top_seq=${FG_WALL_SEQ[texY_top]}
+        bottom_seq=${BG_WALL_SEQ[texY_bottom]}
+
+        colbuf+="${top_seq}${bottom_seq}"
+        if ((rows_out+1<rows)); then
+            colbuf+="${hblock_fill}${reposition_row}"
+        else
+            colbuf+="${hblock_fill}"
+        fi
+        rows_out+=1
+        acc_top=$((acc_top + (step_fp<<1)))
+    done
+
+    # Bottom boundary mixed row (top wall, bottom grass)
+    if ((bottom_boundary && rows_out<rows)); then
+        # top is last wall half
+        ((texY_top = ((acc_top >> FP_SHIFT) & (TEX_H - 1))))
+        top_seq=${FG_WALL_SEQ[texY_top]}
+        bottom_seq=$GRASS_BG
+        colbuf+="${top_seq}${bottom_seq}"
+        if ((rows_out+1<rows)); then
+            colbuf+="${hblock_fill}${reposition_row}"
+        else
+            colbuf+="${hblock_fill}"
+        fi
+        rows_out+=1
+        acc_top=$((acc_top + (step_fp<<1)))
+    fi
+
+    # Emit floor full rows
+    colbuf+="${GRASS_FG}${GRASS_BG}"
+    for ((y=0; y<floor_rows && rows_out<rows; y++)); do
+        if ((rows_out+1<rows)); then
+            colbuf+="${hblock_fill}${reposition_row}"
+        else
+            colbuf+="${hblock_fill}"
+        fi
+        rows_out+=1
+        acc_top=$((acc_top + (step_fp<<1)))
+    done
+
+    # Print the entire column at once
+    printf "%b" "$colbuf"
 }
 
 

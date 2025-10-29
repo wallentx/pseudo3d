@@ -20,6 +20,14 @@ declare -a SHADE_TABLE
 declare -a XTERM_R XTERM_G XTERM_B
 # Pre-generate lookup tables for truecolor shading.
 declare -a SHADE_R SHADE_G SHADE_B
+# Precomputed ANSI escape sequences for 256-color mode
+declare -a FG256 BG256
+# Precomputed truecolor escape sequences per shaded color (color_index * 7 + shade_level)
+declare -a FG_TRUE_SHADES BG_TRUE_SHADES
+# Precomputed repeated shading for 256-color (shade_level * 256 + color_index)
+declare -a SHADE_N
+# Precomputed sky/grass escape sequences
+declare SKY_FG SKY_BG GRASS_FG GRASS_BG
 
 # System colors (0-15) - these are often customized, so these are approximations.
 XTERM_R+=(0 0 170 85 0 170 0 170 85 85 0 255 0 255 85 255)
@@ -44,15 +52,15 @@ for i in {0..23}; do
     XTERM_B+=($gray)
 done
 
-# Pre-calculate truecolor shading tables
+# Pre-calculate truecolor shading tables (0..6 levels to allow side-dimming)
 for i in {0..255}; do
     r=${XTERM_R[i]}
     g=${XTERM_G[i]}
     b=${XTERM_B[i]}
-    for s in {0..5}; do
-        SHADE_R[i*6+s]=$r
-        SHADE_G[i*6+s]=$g
-        SHADE_B[i*6+s]=$b
+    for s in {0..6}; do
+        SHADE_R[i*7+s]=$r
+        SHADE_G[i*7+s]=$g
+        SHADE_B[i*7+s]=$b
         # Reduce brightness for the next shade level
         r=$((r*8/10))
         g=$((g*8/10))
@@ -88,3 +96,45 @@ for i in {0..255}; do
         esac
     fi
 done
+
+# Precompute 256-color FG/BG escape sequences
+for ((i=0; i<=255; i++)); do
+    FG256[i]=$'\e[38;5;'"$i"$'m'
+    BG256[i]=$'\e[48;5;'"$i"$'m'
+done
+
+# Precompute multi-step shading for 256-color (levels 0..6)
+for ((s=0; s<=6; s++)); do
+    for ((i=0; i<=255; i++)); do
+        val=$i
+        for ((t=0; t<s; t++)); do
+            val=${SHADE_TABLE[val]}
+        done
+        SHADE_N[s*256 + i]=$val
+    done
+done
+
+# Precompute truecolor FG/BG escape sequences per shade level (levels 0..6)
+for ((i=0; i<=255; i++)); do
+    for ((s=0; s<=6; s++)); do
+        idx=$((i*7+s))
+        r=${SHADE_R[idx]}
+        g=${SHADE_G[idx]}
+        b=${SHADE_B[idx]}
+        FG_TRUE_SHADES[idx]=$'\e[38;2;'"$r;$g;$b"$'m'
+        BG_TRUE_SHADES[idx]=$'\e[48;2;'"$r;$g;$b"$'m'
+    done
+done
+
+# Precompute sky/grass escape sequences
+if ((truecolor)); then
+    SKY_FG=$'\e[38;2;'"$sky"$'m'
+    SKY_BG=$'\e[48;2;'"$sky"$'m'
+    GRASS_FG=$'\e[38;2;'"$grass"$'m'
+    GRASS_BG=$'\e[48;2;'"$grass"$'m'
+else
+    SKY_FG=$'\e[38;5;'"$sky"$'m'
+    SKY_BG=$'\e[48;5;'"$sky"$'m'
+    GRASS_FG=$'\e[38;5;'"$grass"$'m'
+    GRASS_BG=$'\e[48;5;'"$grass"$'m'
+fi
