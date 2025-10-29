@@ -109,8 +109,13 @@ gamesetup () {
     ((kitty)) && printf '\e[>11u'
 
     exitfunc () {
+        local status=$?
         dispatch exit
         wait
+
+        # Cleanup buffered output files and optional error log on clean exit
+        rm -f buffered.* >/dev/null 2>&1 || true
+        (( status == 0 )) && rm -f err >/dev/null 2>&1 || true
 
         ((kitty)) && printf '\e[<u' >/dev/tty
         printf %b%.b >/dev/tty \
